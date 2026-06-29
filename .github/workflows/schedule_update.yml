@@ -1,0 +1,52 @@
+name: Update Transit Schedules
+
+on:
+  schedule:
+    # 00:00 UTC on the 1st of every month
+    - cron: "0 0 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-schedules:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Use a token with write access so the bot commit can push back
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run UTA parser
+        run: python src/uta_parser.py
+
+      - name: Run PVTA parser
+        run: python src/pvta_parser.py
+
+      - name: Commit updated schedule files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add output/uta_schedules.json output/pvta_schedules.json
+
+          # Only commit when there are actual changes
+          if git diff --cached --quiet; then
+            echo "No changes to schedule files — skipping commit."
+          else
+            git commit -m "chore(data): auto-update transit schedules [skip ci]"
+            git push origin main
+          fi
