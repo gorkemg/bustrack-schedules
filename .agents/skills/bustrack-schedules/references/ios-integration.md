@@ -133,27 +133,32 @@ final class ScheduleService {
         self.session = session
     }
 
-    /// Fetches and decodes a manifest. Throws ScheduleError on any failure.
-    func fetchManifest(from url: URL) async throws -> (manifest: ScheduleManifest, raw: Data) {
-        let (data, response) = try await session.data(from: url)
-
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+    /// Fetches a manifest using a conditional GET when a cached ETag is available.
+    /// Returns nil on HTTP 304 Not Modified (cached data is still current).
+    /// Throws ScheduleError on any failure.
+    func fetchManifest(from url: URL, cachedEtag: String? = nil) async throws -> (manifest: ScheduleManifest, raw: Data, etag: String?)? {
+        var request = URLRequest(url: url)
+        if let cachedEtag {
+            request.setValue(cachedEtag, forHTTPHeaderField: "If-None-Match")
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
             throw ScheduleError.networkFailure(URLError(.badServerResponse))
         }
-
+        if http.statusCode == 304 { return nil }
+        guard http.statusCode == 200 else {
+            throw ScheduleError.networkFailure(URLError(.badServerResponse))
+        }
         let manifest: ScheduleManifest
         do {
             manifest = try JSONDecoder.scheduleDecoder.decode(ScheduleManifest.self, from: data)
         } catch {
             throw ScheduleError.decodingFailure(error)
         }
-
-        // Gate on major version only — "1.x" is backward compatible with "1.0".
         guard manifest.schemaVersion.prefix(1) == "1" else {
             throw ScheduleError.unsupportedSchemaVersion(manifest.schemaVersion)
         }
-
-        return (manifest, data)
+        return (manifest, data, http.value(forHTTPHeaderField: "ETag"))
     }
 }
 ```
@@ -173,22 +178,33 @@ final class ScheduleCache {
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
-    func save(_ data: Data, for agency: String) throws {
-        try data.write(to: fileURL(for: agency), options: .atomic)
+    func save(_ data: Data, etag: String?, for agency: String) throws {
+        try data.write(to: dataURL(for: agency), options: .atomic)
+        if let etag {
+            try? etag.write(to: etagURL(for: agency), atomically: true, encoding: .utf8)
+        }
     }
 
     func load(for agency: String) -> Data? {
-        try? Data(contentsOf: fileURL(for: agency))
+        try? Data(contentsOf: dataURL(for: agency))
+    }
+
+    func etag(for agency: String) -> String? {
+        try? String(contentsOf: etagURL(for: agency), encoding: .utf8)
     }
 
     func isStale(for agency: String, maxAge: TimeInterval = 7 * 24 * 3600) -> Bool {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL(for: agency).path),
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: dataURL(for: agency).path),
               let modified = attrs[.modificationDate] as? Date else { return true }
         return Date().timeIntervalSince(modified) > maxAge
     }
 
-    private func fileURL(for agency: String) -> URL {
+    private func dataURL(for agency: String) -> URL {
         directory.appendingPathComponent("\(agency.lowercased())_schedules.json")
+    }
+
+    private func etagURL(for agency: String) -> URL {
+        directory.appendingPathComponent("\(agency.lowercased())_schedules.etag")
     }
 }
 ```
@@ -240,9 +256,12 @@ final class ScheduleViewModel {
         defer { isLoading = false }
 
         do {
-            let (newManifest, raw) = try await service.fetchManifest(from: endpoint)
-            try cache.save(raw, for: agency)
-            manifest = newManifest
+            if let result = try await service.fetchManifest(from: endpoint, cachedEtag: cache.etag(for: agency)) {
+                // 200 — new content; update cache and manifest.
+                try cache.save(result.raw, etag: result.etag, for: agency)
+                manifest = result.manifest
+            }
+            // nil — 304 Not Modified; cached manifest already shown above.
             error = nil
         } catch let e as ScheduleError {
             error = e
@@ -331,58 +350,173 @@ struct RouteRowView: View {
 }
 ```
 
-## Route detail / PDF viewer
+## Asset caching (on-demand)
+
+Assets (schedule PDFs and PVTA route map JPEGs) are downloaded on demand when the user taps "View". The URL from the manifest is the cache key: if an agency publishes a new file at a new URL, the old cached file becomes an orphan and the new one is downloaded automatically.
+
+```swift
+// Services/AssetCache.swift
+import Foundation
+
+final class AssetCache {
+    static let shared = AssetCache()
+    private let directory: URL
+
+    private init() {
+        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        directory = docs.appendingPathComponent("BusTrackAssets", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        excludeFromBackup(directory)  // reconstructable data must not inflate iCloud backups
+    }
+
+    /// Returns a local file URL, downloading from `remoteURL` only if missing or stale.
+    func localURL(for remoteURL: URL) async throws -> URL {
+        let local = cacheFile(for: remoteURL)
+        if FileManager.default.fileExists(atPath: local.path),
+           let localMod = modificationDate(local),
+           let serverMod = try? await lastModified(remoteURL),
+           localMod >= serverMod {
+            return local
+        }
+        return try await fetch(remoteURL, to: local)
+    }
+
+    private func fetch(_ url: URL, to local: URL) async throws -> URL {
+        let (tmp, response) = try await URLSession.shared.download(from: url)
+        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        try? FileManager.default.removeItem(at: local)
+        try FileManager.default.moveItem(at: tmp, to: local)
+        excludeFromBackup(local)
+        return local
+    }
+
+    private func lastModified(_ url: URL) async throws -> Date? {
+        var req = URLRequest(url: url)
+        req.httpMethod = "HEAD"
+        let (_, response) = try await URLSession.shared.data(for: req)
+        guard let http = response as? HTTPURLResponse,
+              let header = http.value(forHTTPHeaderField: "Last-Modified") else { return nil }
+        return DateFormatter.httpDate.date(from: header)
+    }
+
+    private func modificationDate(_ url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    private func cacheFile(for url: URL) -> URL {
+        let hash = String(abs(url.absoluteString.hashValue), radix: 16)
+        return directory.appendingPathComponent("\(hash)_\(url.lastPathComponent)")
+    }
+
+    private func excludeFromBackup(_ url: URL) {
+        var mutable = url
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try? mutable.setResourceValues(values)
+    }
+}
+
+private extension DateFormatter {
+    static let httpDate: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        return f
+    }()
+}
+```
+
+## Route detail view
+
+`.quickLookPreview` handles both PDFs and JPEG route maps uniformly, eliminating the need to distinguish asset types in the view layer.
 
 ```swift
 // Views/RouteDetailView.swift
 import SwiftUI
-import SafariServices
-import PDFKit
+import QuickLook
 
 struct RouteDetailView: View {
     let entry: RouteEntry
-    @State private var showSchedule = false
-    @State private var showMap = false
+    @State private var scheduleState: AssetState = .idle
+    @State private var mapState: AssetState = .idle
+    @State private var previewURL: URL?
 
     var body: some View {
         List {
-            if let url = entry.schedulePdfUrl {
-                Button("View Schedule") { showSchedule = true }
-                    .sheet(isPresented: $showSchedule) {
-                        SafariView(url: url)
-                    }
-            }
-            if let url = entry.mapPdfUrl {
-                Button("View Map") { showMap = true }
-                    .sheet(isPresented: $showMap) {
-                        SafariView(url: url)
-                    }
-            }
+            assetRow("View Schedule", icon: "calendar", url: entry.schedulePdfUrl, state: $scheduleState)
+            assetRow("View Map",      icon: "map",      url: entry.mapPdfUrl,      state: $mapState)
         }
         .navigationTitle(entry.displayName)
+        .quickLookPreview($previewURL)
+    }
+
+    @ViewBuilder
+    private func assetRow(_ label: String, icon: String, url: URL?, state: Binding<AssetState>) -> some View {
+        if url != nil {
+            Button {
+                Task { await openAsset(url: url!, state: state) }
+            } label: {
+                HStack {
+                    Label(label, systemImage: icon)
+                    Spacer()
+                    switch state.wrappedValue {
+                    case .loading: ProgressView()
+                    case .failed:  Image(systemName: "exclamationmark.triangle").foregroundStyle(.red)
+                    case .idle:    EmptyView()
+                    }
+                }
+            }
+            .disabled(state.wrappedValue == .loading)
+            if case .failed(let msg) = state.wrappedValue {
+                Text(msg).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func openAsset(url: URL, state: Binding<AssetState>) async {
+        state.wrappedValue = .loading
+        do {
+            previewURL = try await AssetCache.shared.localURL(for: url)
+            state.wrappedValue = .idle
+        } catch {
+            state.wrappedValue = .failed(error.localizedDescription)
+        }
     }
 }
 
-struct SafariView: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        SFSafariViewController(url: url)
-    }
-
-    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+enum AssetState: Equatable {
+    case idle, loading
+    case failed(String)
 }
 ```
 
 ## Caching strategy
 
+### Manifest (JSON)
+
 | Scenario | Behavior |
 |----------|----------|
-| No cached file | Fetch immediately; show `ProgressView` while loading |
-| Cache < 7 days old | Serve cache; skip network entirely |
-| Cache ≥ 7 days old | Serve cache immediately; refresh in background |
-| Pull-to-refresh | Force network fetch regardless of cache age |
+| No cached file | Fetch immediately; show `ProgressView` |
+| Cache < 7 days old | Serve cache; skip network |
+| Cache ≥ 7 days old | Serve cache immediately; conditional GET in background via `If-None-Match` |
+| Server returns 304 | ETag matches — keep cache, no download |
+| Server returns 200 | New ETag + bytes; update cache and manifest |
+| Pull-to-refresh | Force conditional GET regardless of age |
 | Fetch fails, cache exists | Keep showing cached data; surface error as banner |
 | Fetch fails, no cache | Show `ContentUnavailableView` with error |
 
-Cache stores raw JSON bytes so re-decoding on every launch picks up schema changes without clearing the cache.
+Manifest bytes live in `Caches/BusTrackSchedules/`; ETag in a companion `.etag` sidecar. Re-decoding on each launch means schema updates are picked up without clearing the cache.
+
+### Assets (PDFs & JPEG maps)
+
+| Scenario | Behavior |
+|----------|----------|
+| Asset not cached | Download on user tap; show `ProgressView` |
+| Asset cached, `Last-Modified` unchanged | Serve local file immediately |
+| Asset cached, `Last-Modified` newer | Re-download; replace cached file |
+| Asset URL changed in manifest | Different cache key → fresh download; old file becomes orphan |
+| Download fails | Show error label inline; button re-enables for retry |
+
+Assets live in `Documents/BusTrackAssets/` with `isExcludedFromBackup = true`. The cache key is the asset URL, so agency-side file renames (common for PDF version updates) automatically trigger a fresh download.

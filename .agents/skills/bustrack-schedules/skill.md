@@ -87,11 +87,11 @@ RouteGroup
 1. Add `Codable` models (`ScheduleManifest`, `RouteEntry`, `RouteGroup`) — see [references/ios-integration.md](references/ios-integration.md).
 2. Configure `JSONDecoder` with `.iso8601` date decoding strategy.
 3. Implement `ScheduleService.fetchManifest(from:)` with schema version gate (reject unknown major versions).
-4. Implement `ScheduleCache` writing raw bytes to the Caches directory (keyed by agency name).
-5. Create `ScheduleViewModel` using `@Observable`. On `load()`: serve cache immediately, skip network if fresh (<7 days), else refresh in background.
+4. Implement `ScheduleCache` writing raw bytes to the Caches directory; store the response `ETag` in a companion sidecar file so subsequent refreshes can use a conditional GET (`If-None-Match`) and skip re-downloading unchanged content.
+5. Create `ScheduleViewModel` using `@Observable`. On `load()`: serve cache immediately, skip network if fresh (<7 days), else issue a conditional GET in the background — handle 304 silently, update manifest on 200.
 6. Build a SwiftUI `List` driven by `manifest.groupings.values.first ?? []`, using `ForEach` over `RouteGroup.routeIds` and resolving each via `manifest.routes[id]`.
 7. Add `RouteEntry.color: Color?` computed property converting `route_color` hex to SwiftUI `Color`.
-8. Open PDFs via `SFSafariViewController` or a `PDFView` wrapper. Guard on `schedulePdfUrl != nil` before enabling the button.
+8. Implement `AssetCache` for on-demand downloads of schedules and maps — stores files in `Documents/BusTrackAssets/` with `isExcludedFromBackup = true`; uses the asset URL as the cache key; revalidates via `Last-Modified` before re-downloading. Display with `.quickLookPreview` (handles both PDFs and JPEG route maps). Show `ProgressView` while downloading; surface errors inline with a retry affordance.
 
 ---
 
@@ -113,6 +113,8 @@ RouteGroup
 | `schema_version` major ≠ `"1"` | Throw, show update prompt — do not render with unknown schema |
 | `schedule_pdf_url` is null | Hide/disable button — never show broken link |
 | `map_pdf_url` is null | Hide/disable button |
+| Asset download in progress | Disable button; show inline `ProgressView` to prevent double-download |
+| Asset download fails | Show error label inline; re-enable button for retry |
 | `route_long_name` is `""` | Fall back to `route_short_name` |
 | `route_color` is null | Fall back to design-system default color |
 | Route key in `route_ids` absent from `routes` | Skip silently |
@@ -128,3 +130,5 @@ RouteGroup
 4. **`generated_at` is a generation timestamp, not a data-effective date.** Use only for "last refreshed" display copy.
 5. **Cache raw JSON bytes, not decoded structs.** Re-decode on each launch so schema updates are picked up without a cache clear.
 6. **Check only the major version prefix** when gating on `schema_version`. A `1.1` manifest is valid for a `1.0` client.
+7. **Set `isExcludedFromBackup = true` for every file in `Documents/BusTrackAssets/`.** Downloaded schedules and maps are reconstructable from the CDN and must not inflate iCloud backups — violating this can trigger App Store review rejection for excessive non-backup storage.
+8. **Use the asset URL as the cache key.** Agencies update files by publishing a new URL (e.g. version suffix in filename). A URL change in the manifest automatically triggers a fresh download; the old local file becomes an orphan and can be swept on a storage-limit cleanup.
