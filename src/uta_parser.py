@@ -10,13 +10,12 @@ from __future__ import annotations
 import csv
 import json
 import logging
-import os
 import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -148,6 +147,7 @@ def _process_route(
     entry: dict = {
         "route_short_name": route.get("route_short_name", "").strip(),
         "route_long_name": route.get("route_long_name", "").strip(),
+        "route_color": route.get("route_color", "").strip() or None,
         "schedule_pdf_url": None,
         "map_pdf_url": None,
     }
@@ -172,7 +172,7 @@ def _process_route(
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Groupings
 # ---------------------------------------------------------------------------
 
 def build_groupings(
@@ -198,7 +198,11 @@ def build_groupings(
             continue
         groups.append(
             {
-                "group_id": label.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_"),
+                "group_id": label.lower()
+                .replace(" ", "_")
+                .replace("(", "")
+                .replace(")", "")
+                .replace("/", "_"),
                 "name": label,
                 "route_ids": sorted(bucket[label]),
             }
@@ -206,6 +210,10 @@ def build_groupings(
 
     return {"vehicle_type": groups}
 
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main() -> None:
     if not ROUTES_FILE.exists():
@@ -221,9 +229,7 @@ def main() -> None:
     log.info("Loaded %d routes from %s", len(all_routes), ROUTES_FILE)
 
     routes_result: dict[str, dict] = {}
-    routes_meta: dict[str, dict[str, str]] = {
-        r["route_id"]: r for r in all_routes
-    }
+    routes_meta: dict[str, dict[str, str]] = {r["route_id"]: r for r in all_routes}
 
     session = _make_session()
 

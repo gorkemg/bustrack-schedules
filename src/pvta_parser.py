@@ -1,12 +1,16 @@
 """
 PVTA (Pioneer Valley Transit Authority) schedule parser.
 
-Scrapes https://www.pvta.com/schedules.php, extracts PDF/image links per route,
-and emits /output/pvta_schedules.json conforming to schema v1.0.
+Primary data source : GTFS routes.txt  →  data/pvta/routes.txt
+Secondary sources   : schedules.php    →  schedule_pdf_url per route
+                      routeMaps.php    →  map_pdf_url per route
+
+The two web pages are scraped independently and merged with GTFS metadata.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import re
@@ -17,7 +21,7 @@ from pathlib import Path
 from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,11 +31,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+ROUTES_FILE = REPO_ROOT / "data" / "pvta" / "routes.txt"
 OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 
 PVTA_SCHEDULES_URL = "https://www.pvta.com/schedules.php"
+PVTA_MAPS_URL = "https://www.pvta.com/routeMaps.php"
 PVTA_BASE = "https://www.pvta.com/"
 REQUEST_TIMEOUT = 30
+MIN_ROUTES_SANITY = 30
 
 SESSION_HEADERS = {
     "User-Agent": (
@@ -42,71 +49,121 @@ SESSION_HEADERS = {
 
 # ---------------------------------------------------------------------------
 # Static region grouping
+# Keys use *normalized* route_short_name (no Rt/Route prefix).
+# Rt30 → 30, Rt39E → 39E, B43 → B43 (unchanged), Loop → Loop (unchanged).
 # ---------------------------------------------------------------------------
 
 REGION_MAP: dict[str, str] = {
     # Springfield Area
-    "Loop":   "Springfield Area",
-    "G1":     "Springfield Area",
-    "G2":     "Springfield Area",
-    "G2E":    "Springfield Area",
-    "G3":     "Springfield Area",
-    "B4":     "Springfield Area",
-    "G5":     "Springfield Area",
-    "B6":     "Springfield Area",
-    "B7":     "Springfield Area",
-    "B7S":    "Springfield Area",
-    "OWL":    "Springfield Area",
-    "R10S":   "Springfield Area",
-    "R10":    "Springfield Area",
-    "P11":    "Springfield Area",
-    "B12":    "Springfield Area",
-    "R14":    "Springfield Area",
-    "B17":    "Springfield Area",
-    "P20":    "Springfield Area",
-    "P20E":   "Springfield Area",
-    "P21":    "Springfield Area",
-    "P21E":   "Springfield Area",
-    "B23":    "Springfield Area",
-    "R24":    "Springfield Area",
-    "R29":    "Springfield Area",
-    "X90":    "Springfield Area",
-    "X92":    "Springfield Area",
-    # Northampton Area
-    "Rt39E":       "Northampton Area",
-    "R41":         "Northampton Area",
-    "R42":         "Northampton Area",
-    "B43":         "Northampton Area",
+    "Loop":  "Springfield Area",
+    "G1":    "Springfield Area",
+    "G2":    "Springfield Area",
+    "G2E":   "Springfield Area",
+    "G3":    "Springfield Area",
+    "B4":    "Springfield Area",
+    "G5":    "Springfield Area",
+    "B6":    "Springfield Area",
+    "B7":    "Springfield Area",
+    "B7S":   "Springfield Area",
+    "OWL":   "Springfield Area",
+    "R10S":  "Springfield Area",
+    "R10":   "Springfield Area",
+    "P11":   "Springfield Area",
+    "B12":   "Springfield Area",
+    "R14":   "Springfield Area",
+    "B17":   "Springfield Area",
+    "P20":   "Springfield Area",
+    "P20E":  "Springfield Area",
+    "P21":   "Springfield Area",
+    "P21E":  "Springfield Area",
+    "B23":   "Springfield Area",
+    "R24":   "Springfield Area",
+    "R29":   "Springfield Area",
+    "X90":   "Springfield Area",
+    "X92":   "Springfield Area",
+    # Northampton Area  (Rt39 / Rt39E normalized → 39 / 39E)
+    "39E":          "Northampton Area",
+    "R41":          "Northampton Area",
+    "R42":          "Northampton Area",
+    "B43":          "Northampton Area",
     "B43no_school": "Northampton Area",
-    "R44":         "Northampton Area",
-    "B48":         "Northampton Area",
-    "Rt39":        "Northampton Area",
-    "NE":          "Northampton Area",
-    "NSC":         "Northampton Area",
-    # Amherst & Surrounding
-    "Rt30": "Amherst & Surrounding",
-    "Rt31": "Amherst & Surrounding",
-    "Rt33": "Amherst & Surrounding",
-    "Rt34": "Amherst & Surrounding",
-    "Rt35": "Amherst & Surrounding",
-    "Rt36": "Amherst & Surrounding",
-    "Rt38": "Amherst & Surrounding",
-    "Rt45": "Amherst & Surrounding",
-    "Rt46": "Amherst & Surrounding",
-    "WP":   "Amherst & Surrounding",
-    "B79":  "Amherst & Surrounding",
+    "R44":          "Northampton Area",
+    "B48":          "Northampton Area",
+    "39":           "Northampton Area",
+    "NE":           "Northampton Area",
+    "NSC":          "Northampton Area",
+    # Amherst & Surrounding  (Rt30–Rt46 normalized → 30–46)
+    "30":  "Amherst & Surrounding",
+    "31":  "Amherst & Surrounding",
+    "33":  "Amherst & Surrounding",
+    "34":  "Amherst & Surrounding",
+    "35":  "Amherst & Surrounding",
+    "36":  "Amherst & Surrounding",
+    "38":  "Amherst & Surrounding",
+    "45":  "Amherst & Surrounding",
+    "46":  "Amherst & Surrounding",
+    "WP":  "Amherst & Surrounding",
+    "B79": "Amherst & Surrounding",
 }
 
 REGION_ORDER = ["Springfield Area", "Northampton Area", "Amherst & Surrounding"]
 
 
 # ---------------------------------------------------------------------------
+# Normalization
+# ---------------------------------------------------------------------------
+
+def normalize_route_id(raw_id: str) -> str:
+    """
+    Strip leading 'Rt' or 'Route' prefix so web-scraped IDs align with GTFS
+    route_short_name values.
+
+      Rt31   → 31
+      Rt39E  → 39E
+      B43    → B43   (unchanged — no Rt/Route prefix)
+      Loop   → Loop  (unchanged)
+    """
+    cleaned = re.sub(r"(?i)^(route|rt)\s*", "", raw_id.strip())
+    return cleaned if cleaned else raw_id
+
+
+# ---------------------------------------------------------------------------
+# GTFS loader
+# ---------------------------------------------------------------------------
+
+def load_gtfs_routes(path: Path) -> dict[str, dict[str, str | None]]:
+    """
+    Parse GTFS routes.txt and return a dict keyed by route_short_name:
+      { "B43": { "route_long_name": "...", "route_color": "004a97" }, ... }
+    """
+    gtfs: dict[str, dict[str, str | None]] = {}
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        for row in csv.DictReader(fh):
+            short = row.get("route_short_name", "").strip()
+            if not short:
+                continue
+            gtfs[short] = {
+                "route_long_name": row.get("route_long_name", "").strip(),
+                "route_color": row.get("route_color", "").strip() or None,
+            }
+    log.info("Loaded %d routes from GTFS %s", len(gtfs), path)
+    return gtfs
+
+
+# ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _fetch(url: str) -> str | None:
+def _make_session() -> requests.Session:
     session = requests.Session()
     session.headers.update(SESSION_HEADERS)
+    adapter = requests.adapters.HTTPAdapter(max_retries=2)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def _fetch(session: requests.Session, url: str) -> str | None:
     try:
         resp = session.get(url, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
@@ -117,155 +174,119 @@ def _fetch(url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# DOM parsing
+# DOM helpers shared by both page parsers
 # ---------------------------------------------------------------------------
 
-_PDF_OR_IMG_RE = re.compile(r"\.(pdf|jpg|jpeg|png)$", re.IGNORECASE)
+# Matches PDF, JPEG, PNG asset hrefs
+_ASSET_RE = re.compile(r"\.(pdf|jpg|jpeg|png)$", re.IGNORECASE)
+
+# Matches raw (pre-normalization) route identifiers as they appear in table cells
+_ROUTE_ID_RE = re.compile(
+    r"^(Loop|OWL|NSC|NE|WP|[A-Z]\d+\w*|Rt\d+\w*|[A-Z]{1,3}\d*\w*|\d+\w*)$",
+    re.IGNORECASE,
+)
 
 
 def _absolute(href: str) -> str:
-    """Ensure href is absolute against the PVTA base URL."""
     if href.startswith("http"):
         return href
     return urljoin(PVTA_BASE, href)
 
 
-def _classify_link(href: str, text: str) -> tuple[bool, bool]:
-    """Return (is_schedule, is_map) based on href and anchor text heuristics."""
-    combined = (href + " " + text).lower()
-    is_schedule = "schedule" in combined or "timetable" in combined
-    is_map = "map" in combined or "system" in combined
-    return is_schedule, is_map
+def _first_asset_in_cells(cells) -> str | None:
+    """Return the first PDF/image URL found across the given table cells."""
+    for cell in cells:
+        for a_tag in cell.find_all("a", href=True):
+            href: str = a_tag["href"]
+            if _ASSET_RE.search(href):
+                return _absolute(href)
+    return None
 
 
-def parse_schedules_page(html: str) -> dict[str, dict]:
+# ---------------------------------------------------------------------------
+# Generic table-based asset-page parser
+# ---------------------------------------------------------------------------
+
+def _parse_asset_table(html: str, page_label: str) -> dict[str, str]:
     """
-    Parse the PVTA schedules page and return a dict keyed by route_id:
-      {
-        "route_short_name": str,
-        "route_long_name": str,
-        "schedule_pdf_url": str | None,
-        "map_pdf_url": str | None,
-      }
+    Parse a PVTA asset page (schedules or maps) whose rows follow the pattern:
+      <tr>
+        <td>RouteID or Rt##</td>
+        <td>Route Name</td>
+        <td><a href="file.pdf">...</a></td>
+      </tr>
 
-    PVTA's schedules.php groups routes in a table or definition-list structure.
-    We apply a broad sweep: find all anchors that look like route containers,
-    then extract PDF/image hrefs from their neighbourhood.
+    Returns dict[normalized_route_id → asset_url].
     """
     soup = BeautifulSoup(html, "lxml")
-    routes: dict[str, dict] = {}
-
-    # PVTA renders schedule rows as <tr> elements where the first cell contains
-    # the route number/name and subsequent cells contain PDF links.
-    # We look for any <tr> that contains a cell with a route-like identifier.
-    route_id_re = re.compile(
-        r"^(Loop|OWL|NSC|NE|WP|[A-Z]\d+\w*|Rt\d+\w*|[A-Z]{1,3}\d*\w*)$",
-        re.IGNORECASE,
-    )
+    result: dict[str, str] = {}
 
     for row in soup.find_all("tr"):
         cells = row.find_all(["td", "th"])
         if len(cells) < 2:
             continue
 
-        first_cell_text = cells[0].get_text(" ", strip=True)
-        # Strip "Route" prefix if present (e.g. "Route B43" → "B43")
-        first_cell_text = re.sub(r"(?i)^route\s*", "", first_cell_text).strip()
-
-        if not route_id_re.match(first_cell_text):
+        # Strip "Route" prefix that appears on some pages ("Route B43" → "B43")
+        # Note: "Rt" prefix is intentionally left for normalize_route_id to handle.
+        raw_id = re.sub(r"(?i)^route\s+", "", cells[0].get_text(" ", strip=True)).strip()
+        if not _ROUTE_ID_RE.match(raw_id):
             continue
 
-        route_id = first_cell_text
-        # Route long name often lives in cell[1] before any links
-        long_name_cell = cells[1] if len(cells) > 1 else cells[0]
-        long_name = long_name_cell.get_text(" ", strip=True)
-
-        schedule_url: str | None = None
-        map_url: str | None = None
-
-        for cell in cells:
-            for a_tag in cell.find_all("a", href=True):
-                href: str = a_tag["href"]
-                if not _PDF_OR_IMG_RE.search(href):
-                    continue
-                abs_url = _absolute(href)
-                text = a_tag.get_text(" ", strip=True)
-                is_sched, is_map = _classify_link(href, text)
-
-                if schedule_url is None and (is_sched or (not is_map)):
-                    schedule_url = abs_url
-                elif map_url is None and is_map:
-                    map_url = abs_url
-
-        if schedule_url is None and map_url is None:
-            # No PDF found in this row — skip; likely a header row
+        asset_url = _first_asset_in_cells(cells)
+        if asset_url is None:
             continue
 
-        routes[route_id] = {
-            "route_short_name": route_id,
-            "route_long_name": long_name,
-            "schedule_pdf_url": schedule_url,
-            "map_pdf_url": map_url,
-        }
-        log.info(
-            "route=%-12s schedule=%s  map=%s",
-            route_id,
-            "✓" if schedule_url else "✗",
-            "✓" if map_url else "✗",
-        )
+        norm_id = normalize_route_id(raw_id)
+        if norm_id not in result:
+            result[norm_id] = asset_url
+            log.info("%-20s %-8s → %s", page_label, norm_id, asset_url)
 
-    if not routes:
-        log.warning(
-            "Table-based parse yielded 0 routes — falling back to link sweep."
-        )
-        routes = _link_sweep_fallback(soup)
+    if not result:
+        log.warning("%s: table parse yielded 0 routes — trying link sweep", page_label)
+        result = _link_sweep_fallback(soup, page_label)
 
-    return routes
+    return result
 
 
-def _link_sweep_fallback(soup: BeautifulSoup) -> dict[str, dict]:
+def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
     """
-    Fallback parser: finds PDF links and attempts to infer route IDs from
-    the href path segments (e.g. /g_pdfs/B43_schedule.pdf → B43).
+    Fallback: infer route IDs from PDF href path segments.
+    e.g. /g_pdfs/B43_schedule.pdf → B43
     """
-    routes: dict[str, dict] = {}
-    route_from_href = re.compile(
-        r"/([A-Za-z]{0,3}\d+\w*)_?(schedule|map|timetable)?",
-        re.IGNORECASE,
-    )
+    result: dict[str, str] = {}
+    route_from_href = re.compile(r"/([A-Za-z]{0,3}\d+\w*)[_\-.]", re.IGNORECASE)
 
     for a_tag in soup.find_all("a", href=True):
         href: str = a_tag["href"]
-        if not _PDF_OR_IMG_RE.search(href):
+        if not _ASSET_RE.search(href):
             continue
-        match = route_from_href.search(href)
-        if not match:
+        m = route_from_href.search(href)
+        if not m:
             continue
-        route_id = match.group(1)
-        abs_url = _absolute(href)
-        text = a_tag.get_text(" ", strip=True)
-        is_sched, is_map = _classify_link(href, text)
+        norm_id = normalize_route_id(m.group(1))
+        if norm_id not in result:
+            result[norm_id] = _absolute(href)
 
-        entry = routes.setdefault(
-            route_id,
-            {
-                "route_short_name": route_id,
-                "route_long_name": "",
-                "schedule_pdf_url": None,
-                "map_pdf_url": None,
-            },
-        )
-        if is_map and entry["map_pdf_url"] is None:
-            entry["map_pdf_url"] = abs_url
-        elif entry["schedule_pdf_url"] is None:
-            entry["schedule_pdf_url"] = abs_url
-
-    log.info("Fallback sweep found %d routes", len(routes))
-    return routes
+    log.info("%s: fallback sweep found %d routes", label, len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Grouping
+# Public page parsers
+# ---------------------------------------------------------------------------
+
+def parse_schedules_page(html: str) -> dict[str, str]:
+    """schedules.php → dict[normalized_route_id → schedule_pdf_url]"""
+    return _parse_asset_table(html, "schedules.php")
+
+
+def parse_maps_page(html: str) -> dict[str, str]:
+    """routeMaps.php → dict[normalized_route_id → map_pdf_url]"""
+    return _parse_asset_table(html, "routeMaps.php")
+
+
+# ---------------------------------------------------------------------------
+# Groupings
 # ---------------------------------------------------------------------------
 
 def build_groupings(route_ids: list[str]) -> dict[str, list[dict]]:
@@ -306,16 +327,54 @@ def build_groupings(route_ids: list[str]) -> dict[str, list[dict]]:
 def main() -> None:
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    log.info("Fetching %s", PVTA_SCHEDULES_URL)
-    html = _fetch(PVTA_SCHEDULES_URL)
-    if html is None:
-        log.error("Could not retrieve PVTA schedules page — aborting.")
+    if not ROUTES_FILE.exists():
+        log.error("GTFS routes.txt not found at %s — run the GTFS download step first.", ROUTES_FILE)
         sys.exit(1)
 
-    routes = parse_schedules_page(html)
+    gtfs = load_gtfs_routes(ROUTES_FILE)
 
-    if not routes:
-        log.error("No routes parsed from PVTA page — aborting to avoid empty output.")
+    session = _make_session()
+
+    log.info("Fetching %s", PVTA_SCHEDULES_URL)
+    schedules_html = _fetch(session, PVTA_SCHEDULES_URL)
+    if schedules_html is None:
+        log.error("Could not retrieve %s — aborting.", PVTA_SCHEDULES_URL)
+        sys.exit(1)
+
+    log.info("Fetching %s", PVTA_MAPS_URL)
+    maps_html = _fetch(session, PVTA_MAPS_URL)
+    if maps_html is None:
+        log.warning("Could not retrieve %s — map URLs will be null.", PVTA_MAPS_URL)
+
+    schedule_links = parse_schedules_page(schedules_html)
+    map_links = parse_maps_page(maps_html) if maps_html else {}
+
+    # GTFS is the authoritative list of valid routes. Web scraping enriches
+    # each route with PDF links. Routes found only on the web (not in GTFS) are
+    # included with a warning — they may be seasonal/special services.
+    all_ids: set[str] = set(gtfs.keys()) | set(schedule_links.keys()) | set(map_links.keys())
+
+    routes: dict[str, dict] = {}
+    for route_id in sorted(all_ids):
+        gtfs_meta = gtfs.get(route_id, {})
+        routes[route_id] = {
+            "route_short_name": route_id,
+            "route_long_name": gtfs_meta.get("route_long_name", ""),
+            "route_color": gtfs_meta.get("route_color"),
+            "schedule_pdf_url": schedule_links.get(route_id),
+            "map_pdf_url": map_links.get(route_id),
+        }
+        if route_id not in gtfs:
+            log.warning("route_id=%s found on web pages but absent from GTFS", route_id)
+
+    # Sanity check: a suspiciously small result set indicates a scraping failure.
+    if len(routes) < MIN_ROUTES_SANITY:
+        log.error(
+            "Sanity check failed: only %d routes found (minimum %d). "
+            "Aborting to prevent publishing corrupted output.",
+            len(routes),
+            MIN_ROUTES_SANITY,
+        )
         sys.exit(1)
 
     output = {

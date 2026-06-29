@@ -35,6 +35,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ── UTA ────────────────────────────────────────────────────────────────
+
       - name: Fetch and Extract Current UTA GTFS Feed
         id: uta_gtfs
         continue-on-error: true
@@ -50,11 +52,24 @@ jobs:
         continue-on-error: true
         run: python src/uta_parser.py
 
+      # ── PVTA ───────────────────────────────────────────────────────────────
+
+      - name: Fetch and Extract Current PVTA GTFS Feed
+        id: pvta_gtfs
+        continue-on-error: true
+        run: |
+          mkdir -p data/pvta
+          curl -fsSL "http://www.pvta.com/g_trans/google_transit.zip" -o pvta_gtfs.zip
+          unzip -o pvta_gtfs.zip routes.txt -d data/pvta/
+          rm pvta_gtfs.zip
+
       - name: Run PVTA parser
-        if: always()
+        if: steps.pvta_gtfs.outcome == 'success'
         id: pvta_parser
         continue-on-error: true
         run: python src/pvta_parser.py
+
+      # ── Gate ───────────────────────────────────────────────────────────────
 
       - name: Enforce Workflow Status
         if: always()
@@ -62,11 +77,14 @@ jobs:
           FAILED=0
           [[ "${{ steps.uta_gtfs.outcome }}"   == "failure" ]] && FAILED=1
           [[ "${{ steps.uta_parser.outcome }}"  == "failure" ]] && FAILED=1
+          [[ "${{ steps.pvta_gtfs.outcome }}"  == "failure" ]] && FAILED=1
           [[ "${{ steps.pvta_parser.outcome }}" == "failure" ]] && FAILED=1
           if [[ $FAILED -eq 1 ]]; then
             echo "Error: One or more critical ETL steps failed. Failing the workflow to trigger notification."
             exit 1
           fi
+
+      # ── Publish ────────────────────────────────────────────────────────────
 
       - name: Publish to GitHub Releases
         if: success()
