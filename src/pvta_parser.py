@@ -281,33 +281,28 @@ def parse_schedules_page(html: str) -> dict[str, str]:
 
 
 def parse_maps_page(html: str) -> dict[str, str]:
-    """routeMaps.php → dict[normalized_route_id → map_pdf_url].
+    """routeMaps.php → dict[normalized_route_id → map_image_url].
 
-    Map filenames follow the pattern <RouteID>[_-]map.<ext>, e.g.:
-      Rt30_map.pdf  → route 30
-      B43_map.pdf   → route B43
-      G1-map.pdf    → route G1
+    The maps page does NOT link PDFs. Instead it embeds each route map as:
+      <img src="maps/{RouteID}.jpg">
+    e.g. maps/Rt30.jpg → route 30, maps/B43.jpg → route B43.
 
-    ([^/]+?) captures the full identifier non-greedily before the [_-]map
-    marker, preserving letter-prefixed routes (B43, G1, R10, X90, …)
-    that would be mangled by a digit-anchored pattern like (\d+\w*).
-    normalize_route_id then strips the Rt/Route prefix where present.
+    We scrape <img src> attributes under the maps/ path and normalize
+    the filename stem via normalize_route_id (strips Rt/Route prefix).
     """
     soup = BeautifulSoup(html, "lxml")
     result: dict[str, str] = {}
-    _map_re = re.compile(r"/([^/]+?)[_-]map\.", re.IGNORECASE)
+    _img_re = re.compile(r"^maps/(.+)\.(jpg|jpeg|png)$", re.IGNORECASE)
 
-    for a_tag in soup.find_all("a", href=True):
-        href: str = a_tag["href"]
-        if not _ASSET_RE.search(href):
-            continue
-        m = _map_re.search(href)
+    for img_tag in soup.find_all("img", src=True):
+        src: str = img_tag["src"]
+        m = _img_re.match(src)
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
         if norm_id not in result:
-            result[norm_id] = _absolute(href)
-            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(href))
+            result[norm_id] = _absolute(src)
+            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(src))
 
     log.info("routeMaps.php: found %d map URLs", len(result))
     return result
