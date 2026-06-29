@@ -281,8 +281,36 @@ def parse_schedules_page(html: str) -> dict[str, str]:
 
 
 def parse_maps_page(html: str) -> dict[str, str]:
-    """routeMaps.php → dict[normalized_route_id → map_pdf_url]"""
-    return _parse_asset_table(html, "routeMaps.php")
+    """routeMaps.php → dict[normalized_route_id → map_pdf_url].
+
+    Map filenames follow the pattern <RouteID>[_-]map.<ext>, e.g.:
+      Rt30_map.pdf  → route 30
+      B43_map.pdf   → route B43
+      G1-map.pdf    → route G1
+
+    ([^/]+?) captures the full identifier non-greedily before the [_-]map
+    marker, preserving letter-prefixed routes (B43, G1, R10, X90, …)
+    that would be mangled by a digit-anchored pattern like (\d+\w*).
+    normalize_route_id then strips the Rt/Route prefix where present.
+    """
+    soup = BeautifulSoup(html, "lxml")
+    result: dict[str, str] = {}
+    _map_re = re.compile(r"/([^/]+?)[_-]map\.", re.IGNORECASE)
+
+    for a_tag in soup.find_all("a", href=True):
+        href: str = a_tag["href"]
+        if not _ASSET_RE.search(href):
+            continue
+        m = _map_re.search(href)
+        if not m:
+            continue
+        norm_id = normalize_route_id(m.group(1))
+        if norm_id not in result:
+            result[norm_id] = _absolute(href)
+            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(href))
+
+    log.info("routeMaps.php: found %d map URLs", len(result))
+    return result
 
 
 # ---------------------------------------------------------------------------
