@@ -136,6 +136,8 @@ A future agency could introduce additional dimension keys. Clients should be wri
 | `name` | `string` | No | Human-readable label for display as a section header (e.g. `"Light Rail (TRAX)"`, `"Springfield Area"`). |
 | `route_ids` | `array<string>` | No | Ordered list of route keys (matching the keys in the top-level `routes` map) that belong to this group. Sorted lexicographically. May be empty `[]` in edge cases; clients should handle this without crashing. |
 
+**A route key may appear in more than one group within the same dimension.** PVTA cross-lists connector routes (e.g. a route bridging Springfield and Northampton) under both region headers on its own website; the pipeline mirrors that by listing the route in both groups' `route_ids`. Clients must not assume exclusivity — do not use group membership as a unique key (e.g. a "jump to this route's section" feature must handle 2 valid targets), and a route appearing in a "favorites by group" UI may legitimately render in two sections.
+
 ### UTA vehicle_type values (exhaustive)
 
 | `name` | `group_id` | Covers |

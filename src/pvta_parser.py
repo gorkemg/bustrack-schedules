@@ -53,68 +53,77 @@ SESSION_HEADERS = {
 # Rt30 → 30, Rt39E → 39E, B43 → B43 (unchanged), Loop → Loop (unchanged).
 # ---------------------------------------------------------------------------
 
-REGION_MAP: dict[str, str] = {
+REGION_SPRINGFIELD = "Springfield Area"
+REGION_NORTHAMPTON = "Northampton Area"
+REGION_AMHERST = "Amherst & Surrounding"
+
+# Values may be a single region (str) or, for connector routes PVTA itself
+# cross-lists under two region headers on schedules.php, a list of regions.
+# A route in 2 regions means it appears in both groups' route_ids arrays —
+# valid per schema v1.0 (route_ids has no uniqueness/exclusivity constraint).
+REGION_MAP: dict[str, str | list[str]] = {
     # Springfield Area
-    "Loop":  "Springfield Area",
-    "G1":    "Springfield Area",
-    "G2":    "Springfield Area",
-    "G2E":   "Springfield Area",
-    "G3":    "Springfield Area",
-    "G19":   "Springfield Area",
-    "G47":   "Springfield Area",
-    "G73E":  "Springfield Area",
-    "B4":    "Springfield Area",
-    "B49":   "Springfield Area",
-    "G5":    "Springfield Area",
-    "B6":    "Springfield Area",
-    "B7":    "Springfield Area",
-    "B7S":   "Springfield Area",
-    "OWL":   "Springfield Area",
-    "R10S":  "Springfield Area",
-    "R10":   "Springfield Area",
-    "P11":   "Springfield Area",
-    "B12":   "Springfield Area",
-    "R14":   "Springfield Area",
-    "R22":   "Springfield Area",
-    "B17":   "Springfield Area",
-    "P20":   "Springfield Area",
-    "P20E":  "Springfield Area",
-    "P21":   "Springfield Area",
-    "P21E":  "Springfield Area",
-    "B23":   "Springfield Area",
-    "R24":   "Springfield Area",
-    "R29":   "Springfield Area",
-    "X90":   "Springfield Area",
-    "X92":   "Springfield Area",
-    "X94":   "Springfield Area",
+    "Loop":  REGION_SPRINGFIELD,
+    "G1":    REGION_SPRINGFIELD,
+    "G2":    REGION_SPRINGFIELD,
+    "G2E":   REGION_SPRINGFIELD,
+    "G3":    REGION_SPRINGFIELD,
+    "G19":   REGION_SPRINGFIELD,
+    "G73E":  REGION_SPRINGFIELD,
+    "B4":    REGION_SPRINGFIELD,
+    "G5":    REGION_SPRINGFIELD,
+    "B6":    REGION_SPRINGFIELD,
+    "B7":    REGION_SPRINGFIELD,
+    "B7S":   REGION_SPRINGFIELD,
+    "OWL":   REGION_SPRINGFIELD,
+    "R10S":  REGION_SPRINGFIELD,
+    "R10":   REGION_SPRINGFIELD,
+    "P11":   REGION_SPRINGFIELD,
+    "B12":   REGION_SPRINGFIELD,
+    "R14":   REGION_SPRINGFIELD,
+    "R22":   REGION_SPRINGFIELD,
+    "B17":   REGION_SPRINGFIELD,
+    "P20":   REGION_SPRINGFIELD,
+    "P20E":  REGION_SPRINGFIELD,
+    "P21":   REGION_SPRINGFIELD,
+    "P21E":  REGION_SPRINGFIELD,
+    "B23":   REGION_SPRINGFIELD,
+    "R24":   REGION_SPRINGFIELD,
+    "X90":   REGION_SPRINGFIELD,
+    "X92":   REGION_SPRINGFIELD,
+    "X94":   REGION_SPRINGFIELD,
     # Northampton Area  (Rt39 / Rt39E normalized → 39 / 39E)
-    "39E":          "Northampton Area",
-    "R41":          "Northampton Area",
-    "R42":          "Northampton Area",
-    "B43":          "Northampton Area",
-    "B43no_school": "Northampton Area",
-    "R44":          "Northampton Area",
-    "B48":          "Northampton Area",
-    "39":           "Northampton Area",
-    "NE":           "Northampton Area",
-    "NSC":          "Northampton Area",
-    "904":          "Northampton Area",
+    "39E":          REGION_NORTHAMPTON,
+    "R42":          REGION_NORTHAMPTON,
+    "B43":          REGION_NORTHAMPTON,
+    "B43no_school": REGION_NORTHAMPTON,
+    "R44":          REGION_NORTHAMPTON,
+    "39":           REGION_NORTHAMPTON,
+    "NE":           REGION_NORTHAMPTON,
+    "NSC":          REGION_NORTHAMPTON,
+    "904":          REGION_NORTHAMPTON,
     # Amherst & Surrounding  (Rt30–Rt46 normalized → 30–46)
-    "30":    "Amherst & Surrounding",
-    "31":    "Amherst & Surrounding",
-    "33":    "Amherst & Surrounding",
-    "34":    "Amherst & Surrounding",
-    "35":    "Amherst & Surrounding",
-    "36":    "Amherst & Surrounding",
-    "38":    "Amherst & Surrounding",
-    "38NS":  "Amherst & Surrounding",
-    "45":    "Amherst & Surrounding",
-    "46":    "Amherst & Surrounding",
-    "WP":    "Amherst & Surrounding",
-    "B79":   "Amherst & Surrounding",
-    "PG":    "Amherst & Surrounding",
-    "PS":    "Amherst & Surrounding",
-    "WS":    "Amherst & Surrounding",
+    "30":    REGION_AMHERST,
+    "31":    REGION_AMHERST,
+    "33":    REGION_AMHERST,
+    "34":    REGION_AMHERST,
+    "35":    REGION_AMHERST,
+    "36":    REGION_AMHERST,
+    "38":    REGION_AMHERST,
+    "38NS":  REGION_AMHERST,
+    "45":    REGION_AMHERST,
+    "46":    REGION_AMHERST,
+    "WP":    REGION_AMHERST,
+    "B79":   REGION_AMHERST,
+    "PG":    REGION_AMHERST,
+    "PS":    REGION_AMHERST,
+    "WS":    REGION_AMHERST,
+    # Connector routes PVTA cross-lists under two region headers on schedules.php.
+    "B48": [REGION_SPRINGFIELD, REGION_NORTHAMPTON],
+    "B49": [REGION_SPRINGFIELD, REGION_NORTHAMPTON],
+    "G47": [REGION_SPRINGFIELD, REGION_NORTHAMPTON],
+    "R41": [REGION_SPRINGFIELD, REGION_NORTHAMPTON],
+    "R29": [REGION_SPRINGFIELD, REGION_AMHERST],
 }
 
 REGION_ORDER = ["Springfield Area", "Northampton Area", "Amherst & Surrounding"]
@@ -326,8 +335,11 @@ def parse_maps_page(html: str) -> dict[str, str]:
 def build_groupings(route_ids: list[str]) -> dict[str, list[dict]]:
     bucket: dict[str, list[str]] = defaultdict(list)
     for rid in route_ids:
-        region = REGION_MAP.get(rid, "Other")
-        bucket[region].append(rid)
+        regions = REGION_MAP.get(rid, "Other")
+        if isinstance(regions, str):
+            regions = [regions]
+        for region in regions:
+            bucket[region].append(rid)
 
     all_regions = REGION_ORDER + sorted(
         r for r in bucket if r not in REGION_ORDER and r != "Other"
