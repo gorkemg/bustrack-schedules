@@ -2,8 +2,8 @@
 PVTA (Pioneer Valley Transit Authority) schedule parser.
 
 Primary data source : GTFS routes.txt  →  data/pvta/routes.txt
-Secondary sources   : schedules.php    →  schedule_pdf_url per route
-                      routeMaps.php    →  map_pdf_url per route
+Secondary sources   : bus_service/schedules.php  →  schedule_pdf_url per route
+                      bus_service/maps.php       →  map_pdf_url per route
 
 The two web pages are scraped independently and merged with GTFS metadata.
 """
@@ -18,7 +18,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -34,8 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ROUTES_FILE = REPO_ROOT / "data" / "pvta" / "routes.txt"
 OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 
-PVTA_SCHEDULES_URL = "https://www.pvta.com/schedules.php"
-PVTA_MAPS_URL = "https://www.pvta.com/routeMaps.php"
+PVTA_SCHEDULES_URL = "https://www.pvta.com/bus_service/schedules.php"
+PVTA_MAPS_URL = "https://www.pvta.com/bus_service/maps.php"
 PVTA_BASE = "https://www.pvta.com/"
 REQUEST_TIMEOUT = 30
 MIN_ROUTES_SANITY = 30
@@ -197,8 +197,9 @@ def _fetch(session: requests.Session, url: str) -> str | None:
 # DOM helpers shared by both page parsers
 # ---------------------------------------------------------------------------
 
-# Matches PDF, JPEG, PNG asset hrefs
-_ASSET_RE = re.compile(r"\.(pdf|jpg|jpeg|png)$", re.IGNORECASE)
+# Matches PDF, JPEG, PNG asset hrefs, optionally followed by a cache-busting
+# query string (as emitted by PVTA's Revize document center).
+_ASSET_RE = re.compile(r"\.(pdf|jpg|jpeg|png)(?:$|[?#])", re.IGNORECASE)
 
 # Matches raw (pre-normalization) route identifiers as they appear in table cells
 _ROUTE_ID_RE = re.compile(
@@ -207,19 +208,25 @@ _ROUTE_ID_RE = re.compile(
 )
 
 
-def _absolute(href: str) -> str:
+def _absolute(href: str, source_url: str = PVTA_BASE) -> str:
     if href.startswith("http"):
         return href
-    return urljoin(PVTA_BASE, href)
+    return urljoin(source_url, href)
 
 
-def _first_asset_in_cells(cells) -> str | None:
+def _page_base_url(soup: BeautifulSoup, fallback_url: str) -> str:
+    """Return the HTML base URL, falling back to the fetched page URL."""
+    base_tag = soup.find("base", href=True)
+    return urljoin(fallback_url, base_tag["href"]) if base_tag else fallback_url
+
+
+def _first_asset_in_cells(cells, source_url: str = PVTA_BASE) -> str | None:
     """Return the first PDF/image URL found across the given table cells."""
     for cell in cells:
         for a_tag in cell.find_all("a", href=True):
             href: str = a_tag["href"]
             if _ASSET_RE.search(href):
-                return _absolute(href)
+                return _absolute(href, source_url)
     return None
 
 
@@ -227,7 +234,9 @@ def _first_asset_in_cells(cells) -> str | None:
 # Generic table-based asset-page parser
 # ---------------------------------------------------------------------------
 
-def _parse_asset_table(html: str, page_label: str) -> dict[str, str]:
+def _parse_asset_table(
+    html: str, page_label: str, source_url: str = PVTA_BASE
+) -> dict[str, str]:
     """
     Parse a PVTA asset page (schedules or maps) whose rows follow the pattern:
       <tr>
@@ -252,7 +261,7 @@ def _parse_asset_table(html: str, page_label: str) -> dict[str, str]:
         if not _ROUTE_ID_RE.match(raw_id):
             continue
 
-        asset_url = _first_asset_in_cells(cells)
+        asset_url = _first_asset_in_cells(cells, source_url)
         if asset_url is None:
             continue
 
@@ -263,12 +272,14 @@ def _parse_asset_table(html: str, page_label: str) -> dict[str, str]:
 
     if not result:
         log.warning("%s: table parse yielded 0 routes — trying link sweep", page_label)
-        result = _link_sweep_fallback(soup, page_label)
+        result = _link_sweep_fallback(soup, page_label, source_url)
 
     return result
 
 
-def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
+def _link_sweep_fallback(
+    soup: BeautifulSoup, label: str, source_url: str = PVTA_BASE
+) -> dict[str, str]:
     """
     Fallback: infer route IDs from PDF href path segments.
     e.g. /g_pdfs/B43_schedule.pdf → B43
@@ -285,7 +296,7 @@ def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
             continue
         norm_id = normalize_route_id(m.group(1))
         if norm_id not in result:
-            result[norm_id] = _absolute(href)
+            result[norm_id] = _absolute(href, source_url)
 
     log.info("%s: fallback sweep found %d routes", label, len(result))
     return result
@@ -295,22 +306,89 @@ def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
 # Public page parsers
 # ---------------------------------------------------------------------------
 
+_DOCUMENT_CENTER_ALIASES = {
+    "palmer shuttle": ["PS"],
+    "ware shuttle": ["WS"],
+}
+
+
+def _document_center_route_ids(label: str, href: str) -> list[str]:
+    """Infer one or more route IDs from a Revize Document Center entry."""
+    normalized_label = " ".join(label.split())
+    alias = _DOCUMENT_CENTER_ALIASES.get(normalized_label.casefold())
+    if alias:
+        return alias
+
+    filename = Path(urlsplit(href).path).stem
+    filename_id = normalize_route_id(filename)
+    # A filename such as Rt34_35 is a shared map, not a route named 34_35.
+    if _ROUTE_ID_RE.match(filename_id) and not (
+        "/" in normalized_label.split(" ", 1)[0] and "_" in filename_id
+    ):
+        return [filename_id]
+
+    # Route-map labels can describe a shared asset, e.g. "34/35".
+    label_ids = [
+        normalize_route_id(value)
+        for value in re.split(r"\s*/\s*", normalized_label.split(" ", 1)[0])
+    ]
+    return [route_id for route_id in label_ids if _ROUTE_ID_RE.match(route_id)]
+
+
+def _parse_document_center_assets(
+    html: str, page_label: str, source_url: str
+) -> dict[str, str]:
+    """Parse route assets from PVTA's current Revize Document Center layout."""
+    soup = BeautifulSoup(html, "lxml")
+    asset_base_url = _page_base_url(soup, source_url)
+    result: dict[str, str] = {}
+
+    for anchor in soup.select("#document-center .file-group a[href]"):
+        href: str = anchor["href"]
+        if not _ASSET_RE.search(href):
+            continue
+        asset_url = _absolute(href, asset_base_url)
+        for route_id in _document_center_route_ids(
+            anchor.get_text(" ", strip=True), href
+        ):
+            if route_id not in result:
+                result[route_id] = asset_url
+                log.info("%-20s %-8s → %s", page_label, route_id, asset_url)
+
+    if result:
+        log.info("%s: found %d document-center assets", page_label, len(result))
+    return result
+
 def parse_schedules_page(html: str) -> dict[str, str]:
-    """schedules.php → dict[normalized_route_id → schedule_pdf_url]"""
-    return _parse_asset_table(html, "schedules.php")
+    """Schedules page → dict[normalized_route_id → schedule_pdf_url]."""
+    document_center_links = _parse_document_center_assets(
+        html, "schedules", PVTA_SCHEDULES_URL
+    )
+    if document_center_links:
+        return document_center_links
+    soup = BeautifulSoup(html, "lxml")
+    return _parse_asset_table(
+        html, "schedules", _page_base_url(soup, PVTA_SCHEDULES_URL)
+    )
 
 
 def parse_maps_page(html: str) -> dict[str, str]:
-    """routeMaps.php → dict[normalized_route_id → map_image_url].
+    """Maps page → dict[normalized_route_id → map_image_url].
 
-    The maps page does NOT link PDFs. Instead it embeds each route map as:
+    The current page is a Revize Document Center. The legacy fallback expects
+    embedded images in the form:
       <img src="maps/{RouteID}.jpg">
     e.g. maps/Rt30.jpg → route 30, maps/B43.jpg → route B43.
 
     We scrape <img src> attributes under the maps/ path and normalize
     the filename stem via normalize_route_id (strips Rt/Route prefix).
     """
+    document_center_links = _parse_document_center_assets(html, "maps", PVTA_MAPS_URL)
+    if document_center_links:
+        return document_center_links
+
     soup = BeautifulSoup(html, "lxml")
+    asset_base_url = _page_base_url(soup, PVTA_MAPS_URL)
     result: dict[str, str] = {}
     _img_re = re.compile(r"^maps/(.+)\.(jpg|jpeg|png)$", re.IGNORECASE)
 
@@ -321,10 +399,10 @@ def parse_maps_page(html: str) -> dict[str, str]:
             continue
         norm_id = normalize_route_id(m.group(1))
         if norm_id not in result:
-            result[norm_id] = _absolute(src)
-            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(src))
+            result[norm_id] = _absolute(src, asset_base_url)
+            log.info("maps            %-8s → %s", norm_id, _absolute(src, asset_base_url))
 
-    log.info("routeMaps.php: found %d map URLs", len(result))
+    log.info("maps: found %d map URLs", len(result))
     return result
 
 
