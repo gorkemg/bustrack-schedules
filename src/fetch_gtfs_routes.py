@@ -2,31 +2,59 @@
 import argparse
 import io
 import stat
+import time
 import zipfile
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
-import requests
+from urllib3.exceptions import HTTPError as Urllib3Error
+
+try:
+    from .security_utils import make_session, resolve_document_url, valid_document_url
+except ImportError:
+    from security_utils import make_session, resolve_document_url, valid_document_url
 
 MAX_ARCHIVE = 50 * 1024 * 1024
 MAX_ROUTES = 10 * 1024 * 1024
 MAX_REDIRECTS = 5
+TOTAL_SECONDS = 120
+CONNECT_SECONDS = 10
+READ_SECONDS = 10
 
 
 def download(url, session):
+    deadline = time.monotonic() + TOTAL_SECONDS
     for _ in range(MAX_REDIRECTS + 1):
-        if urlsplit(url).scheme.lower() != "https":
-            raise ValueError("GTFS URLs and redirects must use HTTPS")
-        with session.get(url, stream=True, allow_redirects=False, timeout=(10, 60)) as response:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("GTFS download deadline exceeded")
+        if not valid_document_url(url) or urlsplit(url).scheme.lower() != "https":
+            raise ValueError("GTFS URLs and redirects must be credential-free HTTPS")
+        with session.get(url, stream=True, allow_redirects=False,
+                         timeout=(min(CONNECT_SECONDS, remaining), min(READ_SECONDS, remaining))) as response:
             if response.is_redirect:
-                url = urljoin(url, response.headers["Location"])
+                url = resolve_document_url(url, response.headers.get("Location"))
+                if not url:
+                    raise ValueError("Invalid GTFS redirect location")
                 continue
             response.raise_for_status()
+            if not 200 <= response.status_code < 300:
+                raise ValueError("Unexpected GTFS response status")
             length = response.headers.get("Content-Length")
-            if length and int(length) > MAX_ARCHIVE:
-                raise ValueError("GTFS archive exceeds size limit")
+            if length is not None and (not length.isdigit() or int(length) > MAX_ARCHIVE):
+                raise ValueError("Invalid or oversized GTFS Content-Length")
             data = bytearray()
-            for chunk in response.iter_content(64 * 1024):
+            while True:
+                if time.monotonic() >= deadline:
+                    raise ValueError("GTFS download deadline exceeded")
+                try:
+                    chunk = response.raw.read1(65536, decode_content=True)
+                except Urllib3Error as exc:
+                    raise ValueError(f"GTFS response read failed: {exc}") from exc
+                if time.monotonic() >= deadline:
+                    raise ValueError("GTFS download deadline exceeded")
+                if not chunk:
+                    break
                 data.extend(chunk)
                 if len(data) > MAX_ARCHIVE:
                     raise ValueError("GTFS archive exceeds size limit")
@@ -56,7 +84,7 @@ def main():
     parser.add_argument("url")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    with requests.Session() as session:
+    with make_session({}) as session:
         routes = extract_routes(download(args.url, session))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(routes)
