@@ -70,8 +70,8 @@ Clients must treat the key as an **opaque string** — never parse it as a numbe
 | `route_short_name` | `string` | No | Short public-facing route identifier (e.g. `"1"`, `"750"`, `"B43"`). Suitable for display in list rows and map pins. For UTA, same as GTFS `route_short_name`. For PVTA, same as the route key. |
 | `route_long_name` | `string` | No | Descriptive name (e.g. `"South Temple"`, `"FrontRunner"`). May be empty string `""` if the agency's GTFS omits it. Never null. |
 | `route_color` | `string` | **Yes** | 6-character hex color without `#` prefix (e.g. `"2eb566"`). Sourced directly from GTFS `route_color` column. `null` if the agency does not specify a color. Prepend `#` for use in CSS or SwiftUI `Color(hex:)`. |
-| `schedule_pdf_url` | `string` (URL) | **Yes** | Absolute HTTPS URL to the route's schedule/timetable PDF. `null` if scraping failed for this route or no PDF was found on the agency's website. |
-| `map_pdf_url` | `string` (URL) | **Yes** | Absolute HTTPS URL to the route map PDF or image. `null` under the same conditions. |
+| `schedule_pdf_url` | `string` (URL) | **Yes** | Absolute HTTP(S) URL to the route's schedule/timetable PDF. HTTPS is preferred; HTTP is retained only when supplied by the agency and has no transport integrity. `null` if scraping failed for this route or no PDF was found on the agency's website. |
+| `map_pdf_url` | `string` (URL) | **Yes** | Absolute HTTP(S) URL to the route map PDF or image, with the same HTTP caveat. `null` under the same conditions. |
 
 ### Null semantics
 
