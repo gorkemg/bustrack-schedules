@@ -18,10 +18,15 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
+
+try:
+    from .security_utils import fetch_html, make_session, resolve_document_url
+except ImportError:  # Direct script execution
+    from security_utils import fetch_html, make_session, resolve_document_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +42,6 @@ OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 PVTA_SCHEDULES_URL = "https://www.pvta.com/bus_service/schedules.php"
 PVTA_MAPS_URL = "https://www.pvta.com/bus_service/maps.php"
 PVTA_BASE = "https://www.pvta.com/"
-REQUEST_TIMEOUT = 30
 MIN_ROUTES_SANITY = 30
 
 SESSION_HEADERS = {
@@ -175,20 +179,13 @@ def load_gtfs_routes(path: Path) -> dict[str, dict[str, str | None]]:
 # ---------------------------------------------------------------------------
 
 def _make_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(SESSION_HEADERS)
-    adapter = requests.adapters.HTTPAdapter(max_retries=2)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    return make_session(SESSION_HEADERS)
 
 
 def _fetch(session: requests.Session, url: str) -> str | None:
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as exc:
+        return fetch_html(session, url)
+    except (requests.RequestException, ValueError, OSError) as exc:
         log.error("Failed to fetch %s: %s", url, exc)
         return None
 
@@ -208,16 +205,14 @@ _ROUTE_ID_RE = re.compile(
 )
 
 
-def _absolute(href: str, source_url: str = PVTA_BASE) -> str:
-    if href.startswith("http"):
-        return href
-    return urljoin(source_url, href)
+def _absolute(href: str, source_url: str = PVTA_BASE) -> str | None:
+    return resolve_document_url(source_url, href)
 
 
 def _page_base_url(soup: BeautifulSoup, fallback_url: str) -> str:
     """Return the HTML base URL, falling back to the fetched page URL."""
     base_tag = soup.find("base", href=True)
-    return urljoin(fallback_url, base_tag["href"]) if base_tag else fallback_url
+    return (resolve_document_url(fallback_url, base_tag["href"]) or fallback_url) if base_tag else fallback_url
 
 
 def _first_asset_in_cells(cells, source_url: str = PVTA_BASE) -> str | None:
@@ -226,7 +221,9 @@ def _first_asset_in_cells(cells, source_url: str = PVTA_BASE) -> str | None:
         for a_tag in cell.find_all("a", href=True):
             href: str = a_tag["href"]
             if _ASSET_RE.search(href):
-                return _absolute(href, source_url)
+                resolved = _absolute(href, source_url)
+                if resolved:
+                    return resolved
     return None
 
 
@@ -295,8 +292,9 @@ def _link_sweep_fallback(
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(href, source_url)
+        absolute = _absolute(href, source_url)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
 
     log.info("%s: fallback sweep found %d routes", label, len(result))
     return result
@@ -348,6 +346,8 @@ def _parse_document_center_assets(
         if not _ASSET_RE.search(href):
             continue
         asset_url = _absolute(href, asset_base_url)
+        if not asset_url:
+            continue
         for route_id in _document_center_route_ids(
             anchor.get_text(" ", strip=True), href
         ):
@@ -398,9 +398,10 @@ def parse_maps_page(html: str) -> dict[str, str]:
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(src, asset_base_url)
-            log.info("maps            %-8s → %s", norm_id, _absolute(src, asset_base_url))
+        absolute = _absolute(src, asset_base_url)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
+            log.info("maps            %-8s → %s", norm_id, absolute)
 
     log.info("maps: found %d map URLs", len(result))
     return result
