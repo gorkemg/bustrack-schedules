@@ -18,3 +18,7 @@ The build checks both artifacts before upload, and the write-enabled job indepen
 - lxml 5.2.2 was flagged for [CVE-2026-41066](https://github.com/lxml/lxml/security/advisories/GHSA-vfmq-68hx-4jfw), fixed in 6.1.0. This affects particular XML parsers, not necessarily this project's HTML parsing. 6.1.3 is an official [PyPI release](https://pypi.org/project/lxml/6.1.3/).
 - [pip-audit 2.10.1](https://pypi.org/project/pip-audit/2.10.1/) checks the resolved dependency tree against its advisory service. On 2026-10-27 the original requirements produced findings for Requests and lxml; the updated requirements produced no known vulnerabilities in a local Python 3.12 resolution. CI repeats the audit on Python 3.11.
 - Action commit pins were checked against the corresponding upstream Git tag refs on 2026-10-27. Review future tag-to-commit changes and upstream release notes when Dependabot proposes them.
+
+## Beta monitoring
+
+The default-branch security workflow explicitly checks out beta for a separate read-only beta-security-check on its daily schedule and manual security-check runs. Pull requests continue to use security-check against the proposed branch; they do not publish releases. A schedule in beta alone would not run daily. Both jobs must be inspected when reviewing a scheduled run. Dependabot version-update PRs target the default branch; beta receives deliberate security backports. Test success does not establish feed freshness or semantic correctness.

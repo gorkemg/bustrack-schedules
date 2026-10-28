@@ -7,7 +7,7 @@ on:
       - beta
     paths:
       - 'src/**'
-      - '.github/workflows/**'
+      - '.github/workflows/schedule_update.yml'
       - 'requirements.txt'
   schedule:
     # 00:00 UTC on the 1st of every month (runs on default branch: main)
@@ -104,6 +104,7 @@ jobs:
           retention-days: 1
 
   publish-schedules:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/beta'
     needs: build-schedules
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -138,10 +139,13 @@ jobs:
             UTA_TAG="uta"
             PVTA_TAG="pvta"
             PRERELEASE=""
-          else
-            UTA_TAG="uta-${BRANCH}"
-            PVTA_TAG="pvta-${BRANCH}"
+          elif [ "$BRANCH" == "beta" ]; then
+            UTA_TAG="uta-beta"
+            PVTA_TAG="pvta-beta"
             PRERELEASE="--prerelease"
+          else
+            echo "Unsupported branch: $BRANCH" >&2
+            exit 1
           fi
 
           _ensure_release() {
