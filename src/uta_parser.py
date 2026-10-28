@@ -36,7 +36,6 @@ ROUTES_FILE = REPO_ROOT / "data" / "uta" / "routes.txt"
 OUTPUT_FILE = REPO_ROOT / "output" / "uta_schedules.json"
 
 BASE_URL = "https://www.rideuta.com"
-REQUEST_TIMEOUT = 20
 MAX_WORKERS = 10
 
 SESSION_HEADERS = {

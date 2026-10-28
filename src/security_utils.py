@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlsplit
 MAX_HTML_BYTES = 4 * 1024 * 1024
 MAX_REDIRECTS = 5
 TOTAL_SECONDS = 30
-READ_SECONDS = 5
+READ_SECONDS = 10
 CONNECT_SECONDS = 5
 
 

@@ -42,7 +42,6 @@ OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 PVTA_SCHEDULES_URL = "https://www.pvta.com/bus_service/schedules.php"
 PVTA_MAPS_URL = "https://www.pvta.com/bus_service/maps.php"
 PVTA_BASE = "https://www.pvta.com/"
-REQUEST_TIMEOUT = 30
 MIN_ROUTES_SANITY = 30
 
 SESSION_HEADERS = {
