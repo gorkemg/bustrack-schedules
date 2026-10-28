@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      python-security:
+        applies-to: security-updates
+        patterns: ['*']
+      python-versions:
+        applies-to: version-updates
+        patterns: ['*']
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    groups:
+      actions-security:
+        applies-to: security-updates
+        patterns: ['*']
+      actions-versions:
+        applies-to: version-updates
+        patterns: ['*']
+        update-types: [minor, patch]

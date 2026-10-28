@@ -2,8 +2,8 @@
 PVTA (Pioneer Valley Transit Authority) schedule parser.
 
 Primary data source : GTFS routes.txt  →  data/pvta/routes.txt
-Secondary sources   : schedules.php    →  schedule_pdf_url per route
-                      routeMaps.php    →  map_pdf_url per route
+Secondary sources   : bus_service/schedules.php → schedule_pdf_url per route
+                      bus_service/maps.php      → map_pdf_url per route
 
 The two web pages are scraped independently and merged with GTFS metadata.
 """
@@ -18,10 +18,15 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urlsplit
 
 import requests
 from bs4 import BeautifulSoup
+
+try:
+    from .security_utils import fetch_html, make_session, resolve_document_url
+except ImportError:
+    from security_utils import fetch_html, make_session, resolve_document_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,10 +39,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 ROUTES_FILE = REPO_ROOT / "data" / "pvta" / "routes.txt"
 OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 
-PVTA_SCHEDULES_URL = "https://www.pvta.com/schedules.php"
-PVTA_MAPS_URL = "https://www.pvta.com/routeMaps.php"
+PVTA_SCHEDULES_URL = "https://www.pvta.com/bus_service/schedules.php"
+PVTA_MAPS_URL = "https://www.pvta.com/bus_service/maps.php"
 PVTA_BASE = "https://www.pvta.com/"
-REQUEST_TIMEOUT = 30
 MIN_ROUTES_SANITY = 30
 
 SESSION_HEADERS = {
@@ -155,20 +159,13 @@ def load_gtfs_routes(path: Path) -> dict[str, dict[str, str | None]]:
 # ---------------------------------------------------------------------------
 
 def _make_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(SESSION_HEADERS)
-    adapter = requests.adapters.HTTPAdapter(max_retries=2)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    return make_session(SESSION_HEADERS)
 
 
 def _fetch(session: requests.Session, url: str) -> str | None:
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as exc:
+        return fetch_html(session, url)
+    except (requests.RequestException, ValueError, OSError) as exc:
         log.error("Failed to fetch %s: %s", url, exc)
         return None
 
@@ -178,7 +175,7 @@ def _fetch(session: requests.Session, url: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 # Matches PDF, JPEG, PNG asset hrefs
-_ASSET_RE = re.compile(r"\.(pdf|jpg|jpeg|png)$", re.IGNORECASE)
+_ASSET_RE = re.compile(r"\.(pdf|jpg|jpeg|png)(?:$|[?#])", re.IGNORECASE)
 
 # Matches raw (pre-normalization) route identifiers as they appear in table cells
 _ROUTE_ID_RE = re.compile(
@@ -187,10 +184,8 @@ _ROUTE_ID_RE = re.compile(
 )
 
 
-def _absolute(href: str) -> str:
-    if href.startswith("http"):
-        return href
-    return urljoin(PVTA_BASE, href)
+def _absolute(href: str) -> str | None:
+    return resolve_document_url(PVTA_BASE, href)
 
 
 def _first_asset_in_cells(cells) -> str | None:
@@ -199,7 +194,9 @@ def _first_asset_in_cells(cells) -> str | None:
         for a_tag in cell.find_all("a", href=True):
             href: str = a_tag["href"]
             if _ASSET_RE.search(href):
-                return _absolute(href)
+                absolute = _absolute(href)
+                if absolute:
+                    return absolute
     return None
 
 
@@ -264,8 +261,9 @@ def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(href)
+        absolute = _absolute(href)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
 
     log.info("%s: fallback sweep found %d routes", label, len(result))
     return result
@@ -275,21 +273,81 @@ def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
 # Public page parsers
 # ---------------------------------------------------------------------------
 
+_DOCUMENT_CENTER_ALIASES = {
+    "palmer shuttle": ["PS"],
+    "ware shuttle": ["WS"],
+}
+
+
+def _document_center_route_ids(label: str, href: str) -> list[str]:
+    """Infer one or more route IDs from a Revize Document Center entry."""
+    normalized_label = " ".join(label.split())
+    alias = _DOCUMENT_CENTER_ALIASES.get(normalized_label.casefold())
+    if alias:
+        return alias
+
+    filename = Path(urlsplit(href).path).stem
+    filename_id = normalize_route_id(filename)
+    # A filename such as Rt34_35 is a shared map, not a route named 34_35.
+    if _ROUTE_ID_RE.match(filename_id) and not (
+        "/" in normalized_label.split(" ", 1)[0] and "_" in filename_id
+    ):
+        return [filename_id]
+
+    # Route-map labels can describe a shared asset, e.g. "34/35".
+    label_ids = [
+        normalize_route_id(value)
+        for value in re.split(r"\s*/\s*", normalized_label.split(" ", 1)[0])
+    ]
+    return [route_id for route_id in label_ids if _ROUTE_ID_RE.match(route_id)]
+
+
+def _parse_document_center_assets(
+    html: str, page_label: str, source_url: str
+) -> dict[str, str]:
+    """Parse route assets from PVTA's current Revize Document Center layout."""
+    soup = BeautifulSoup(html, "lxml")
+    base_tag = soup.find("base", href=True)
+    asset_base_url = (resolve_document_url(source_url, base_tag["href"]) or source_url) if base_tag else source_url
+    result: dict[str, str] = {}
+
+    for anchor in soup.select("#document-center .file-group a[href]"):
+        href: str = anchor["href"]
+        if not _ASSET_RE.search(href):
+            continue
+        asset_url = resolve_document_url(asset_base_url, href)
+        if not asset_url:
+            continue
+        for route_id in _document_center_route_ids(
+            anchor.get_text(" ", strip=True), href
+        ):
+            if route_id not in result:
+                result[route_id] = asset_url
+                log.info("%-20s %-8s → %s", page_label, route_id, asset_url)
+
+    if result:
+        log.info("%s: found %d document-center assets", page_label, len(result))
+    return result
+
 def parse_schedules_page(html: str) -> dict[str, str]:
-    """schedules.php → dict[normalized_route_id → schedule_pdf_url]"""
-    return _parse_asset_table(html, "schedules.php")
+    """Extract schedule URLs from the document center or legacy tables."""
+    document_links = _parse_document_center_assets(html, "schedules", PVTA_SCHEDULES_URL)
+    return document_links if document_links else _parse_asset_table(html, "schedules.php")
 
 
 def parse_maps_page(html: str) -> dict[str, str]:
-    """routeMaps.php → dict[normalized_route_id → map_image_url].
+    """Extract document-center map URLs or legacy embedded images.
 
-    The maps page does NOT link PDFs. Instead it embeds each route map as:
+    Legacy pages embed each route map as:
       <img src="maps/{RouteID}.jpg">
     e.g. maps/Rt30.jpg → route 30, maps/B43.jpg → route B43.
 
     We scrape <img src> attributes under the maps/ path and normalize
     the filename stem via normalize_route_id (strips Rt/Route prefix).
     """
+    document_links = _parse_document_center_assets(html, "maps", PVTA_MAPS_URL)
+    if document_links:
+        return document_links
     soup = BeautifulSoup(html, "lxml")
     result: dict[str, str] = {}
     _img_re = re.compile(r"^maps/(.+)\.(jpg|jpeg|png)$", re.IGNORECASE)
@@ -300,9 +358,10 @@ def parse_maps_page(html: str) -> dict[str, str]:
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(src)
-            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(src))
+        absolute = _absolute(src)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
+            log.info("routeMaps.php   %-8s → %s", norm_id, absolute)
 
     log.info("routeMaps.php: found %d map URLs", len(result))
     return result

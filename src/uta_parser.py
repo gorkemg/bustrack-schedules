@@ -15,10 +15,14 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+try:
+    from .security_utils import fetch_html, make_session, resolve_document_url
+except ImportError:  # Direct script execution
+    from security_utils import fetch_html, make_session, resolve_document_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +36,6 @@ ROUTES_FILE = REPO_ROOT / "data" / "uta" / "routes.txt"
 OUTPUT_FILE = REPO_ROOT / "output" / "uta_schedules.json"
 
 BASE_URL = "https://www.rideuta.com"
-REQUEST_TIMEOUT = 20
 MAX_WORKERS = 10
 
 SESSION_HEADERS = {
@@ -74,20 +77,13 @@ def _vehicle_type_group(short_name: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _make_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(SESSION_HEADERS)
-    adapter = requests.adapters.HTTPAdapter(max_retries=2)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    return make_session(SESSION_HEADERS)
 
 
 def _fetch_page(session: requests.Session, url: str) -> str | None:
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as exc:
+        return fetch_html(session, url)
+    except (requests.RequestException, ValueError, OSError) as exc:
         log.warning("Failed to fetch %s: %s", url, exc)
         return None
 
@@ -114,8 +110,9 @@ def _extract_pdf_links(html: str, page_url: str) -> tuple[str | None, str | None
         href: str = tag["href"]
         if not href.lower().endswith(".pdf"):
             continue
-        absolute = href if href.startswith("http") else urljoin(page_url, href)
-        pdf_links.append((absolute, tag.get_text(" ", strip=True).lower()))
+        absolute = resolve_document_url(page_url, href)
+        if absolute:
+            pdf_links.append((absolute, tag.get_text(" ", strip=True).lower()))
 
     for url, text in pdf_links:
         url_lower = url.lower()
