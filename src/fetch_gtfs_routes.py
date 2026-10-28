@@ -68,7 +68,9 @@ def extract_routes(data):
         if len(matches) != 1:
             raise ValueError("Archive must contain exactly one root routes.txt")
         entry = matches[0]
-        if stat.S_ISLNK(entry.external_attr >> 16) or entry.is_dir():
+        if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+            raise ValueError("Unsupported routes.txt compression method")
+        if stat.S_IFMT(entry.external_attr >> 16) not in (0, stat.S_IFREG) or entry.is_dir():
             raise ValueError("routes.txt must be a regular file")
         if entry.file_size > MAX_ROUTES:
             raise ValueError("routes.txt exceeds size limit")

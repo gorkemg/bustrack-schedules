@@ -33,6 +33,19 @@ class FetchTests(unittest.TestCase):
             with self.subTest(entries=entries), self.assertRaises(ValueError):
                 fetch.extract_routes(archive(entries))
 
+    def test_rejects_unsupported_compression_and_special_files(self):
+        for compression in (zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA):
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w", compression=compression) as compressed_archive:
+                compressed_archive.writestr("routes.txt", "route_id\n1\n")
+            with self.subTest(compression=compression), self.assertRaises(ValueError):
+                fetch.extract_routes(data.getvalue())
+        special = zipfile.ZipInfo("routes.txt")
+        special.create_system = 3
+        special.external_attr = (stat.S_IFIFO | 0o600) << 16
+        with self.assertRaises(ValueError):
+            fetch.extract_routes(archive([(special, "data")]))
+
     def test_rejects_symlink_and_oversize(self):
         link = zipfile.ZipInfo("routes.txt")
         link.create_system = 3
