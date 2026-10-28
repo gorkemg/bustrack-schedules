@@ -18,10 +18,14 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
+
+try:
+    from .security_utils import fetch_html, make_session, resolve_document_url
+except ImportError:
+    from security_utils import fetch_html, make_session, resolve_document_url
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +41,6 @@ OUTPUT_FILE = REPO_ROOT / "output" / "pvta_schedules.json"
 PVTA_SCHEDULES_URL = "https://www.pvta.com/schedules.php"
 PVTA_MAPS_URL = "https://www.pvta.com/routeMaps.php"
 PVTA_BASE = "https://www.pvta.com/"
-REQUEST_TIMEOUT = 30
 MIN_ROUTES_SANITY = 30
 
 SESSION_HEADERS = {
@@ -155,20 +158,13 @@ def load_gtfs_routes(path: Path) -> dict[str, dict[str, str | None]]:
 # ---------------------------------------------------------------------------
 
 def _make_session() -> requests.Session:
-    session = requests.Session()
-    session.headers.update(SESSION_HEADERS)
-    adapter = requests.adapters.HTTPAdapter(max_retries=2)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+    return make_session(SESSION_HEADERS)
 
 
 def _fetch(session: requests.Session, url: str) -> str | None:
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as exc:
+        return fetch_html(session, url)
+    except (requests.RequestException, ValueError, OSError) as exc:
         log.error("Failed to fetch %s: %s", url, exc)
         return None
 
@@ -187,10 +183,8 @@ _ROUTE_ID_RE = re.compile(
 )
 
 
-def _absolute(href: str) -> str:
-    if href.startswith("http"):
-        return href
-    return urljoin(PVTA_BASE, href)
+def _absolute(href: str) -> str | None:
+    return resolve_document_url(PVTA_BASE, href)
 
 
 def _first_asset_in_cells(cells) -> str | None:
@@ -199,7 +193,9 @@ def _first_asset_in_cells(cells) -> str | None:
         for a_tag in cell.find_all("a", href=True):
             href: str = a_tag["href"]
             if _ASSET_RE.search(href):
-                return _absolute(href)
+                absolute = _absolute(href)
+                if absolute:
+                    return absolute
     return None
 
 
@@ -264,8 +260,9 @@ def _link_sweep_fallback(soup: BeautifulSoup, label: str) -> dict[str, str]:
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(href)
+        absolute = _absolute(href)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
 
     log.info("%s: fallback sweep found %d routes", label, len(result))
     return result
@@ -300,9 +297,10 @@ def parse_maps_page(html: str) -> dict[str, str]:
         if not m:
             continue
         norm_id = normalize_route_id(m.group(1))
-        if norm_id not in result:
-            result[norm_id] = _absolute(src)
-            log.info("routeMaps.php   %-8s → %s", norm_id, _absolute(src))
+        absolute = _absolute(src)
+        if norm_id not in result and absolute:
+            result[norm_id] = absolute
+            log.info("routeMaps.php   %-8s → %s", norm_id, absolute)
 
     log.info("routeMaps.php: found %d map URLs", len(result))
     return result
