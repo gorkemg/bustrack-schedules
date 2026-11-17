@@ -20,6 +20,13 @@ MAX_REDIRECTS = 5
 TOTAL_SECONDS = 120
 CONNECT_SECONDS = 10
 READ_SECONDS = 10
+# Match the GTFS converter: PVTA rejects the default python-requests User-Agent.
+SESSION_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+}
 
 
 def download(url, session):
@@ -86,7 +93,7 @@ def main():
     parser.add_argument("url")
     parser.add_argument("output", type=Path)
     args = parser.parse_args()
-    with make_session({}) as session:
+    with make_session(SESSION_HEADERS) as session:
         routes = extract_routes(download(args.url, session))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(routes)
