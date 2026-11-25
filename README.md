@@ -10,7 +10,7 @@ Currently supported agencies: **UTA** (Utah Transit Authority) · **PVTA** (Pion
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  GitHub Actions  (cron: 1st of month · push to main/beta · manual)      │
+│  GitHub Actions  (cron: 1st of month · push to production/staging · manual)│
 │                                                                          │
 │  ① Download UTA GTFS zip  →  data/uta/routes.txt                        │
 │  ② uta_parser.py                                                         │
@@ -152,18 +152,19 @@ The pipeline never commits generated files back to Git. Instead it publishes the
 
 | Environment | Agency | Asset URL |
 |-------------|--------|-----------|
-| Production (`main`) | UTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/uta/uta_schedules.json` |
-| Production (`main`) | PVTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/pvta/pvta_schedules.json` |
-| Beta | UTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/uta-beta/uta_schedules.json` |
-| Beta | PVTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/pvta-beta/pvta_schedules.json` |
+| Production (`production` pointer) | UTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/uta/uta_schedules.json` |
+| Production (`production` pointer) | PVTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/pvta/pvta_schedules.json` |
+| Beta (`staging` pointer) | UTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/uta-beta/uta_schedules.json` |
+| Beta (`staging` pointer) | PVTA | `https://github.com/gorkemg/bustrack-schedules/releases/download/pvta-beta/pvta_schedules.json` |
 
 Each upload uses `--clobber`, so the tag always holds the most recent artifact. The URL is permanent and can be hardcoded in the mobile apps.
 
 ### Rolling release strategy
 
 ```
-main branch  →  tags: uta, pvta          (stable production releases)
-beta branch  →  tags: uta-beta, pvta-beta  (pre-release, marked in GitHub UI)
+production pointer  →  tags: uta, pvta            (stable production releases)
+staging pointer     →  tags: uta-beta, pvta-beta  (pre-release, marked in GitHub UI)
+main                →  nothing (integration only; see docs/release-flow.md)
 ```
 
 ---
@@ -174,9 +175,9 @@ The workflow (`.github/workflows/schedule_update.yml`) runs on three triggers:
 
 | Trigger | Condition |
 |---------|-----------|
-| `schedule` | Cron `0 0 1 * *` — midnight UTC on the 1st of every month |
-| `push` | Any push to `main` or `beta` that touches `src/**`, `.github/workflows/**`, or `requirements.txt` |
-| `workflow_dispatch` | Manual run from the GitHub Actions UI |
+| `schedule` | Cron `0 0 1 * *` — midnight UTC on the 1st of every month (builds `production` code) |
+| `push` | A push to the `production` or `staging` pointer (via *Promote*) that touches `src/**`, `.github/workflows/schedule_update.yml`, or `requirements.txt` |
+| `workflow_dispatch` | Manual run from the GitHub Actions UI; input `channel` (`production` or `beta`) selects the pointer |
 
 Each GTFS download step uses `continue-on-error: true`. If the download fails, the corresponding parser step is skipped. The "Enforce Workflow Status" gate collects all step outcomes and fails the workflow (triggering a GitHub notification) if any are in `failure` state — preventing silent partial publishes.
 
