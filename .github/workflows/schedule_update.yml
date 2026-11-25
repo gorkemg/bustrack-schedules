@@ -1,24 +1,38 @@
 name: Update Transit Schedules
 
+# Publishes from the deploy pointers only (overview/git-branching-model.md): `production` -> tags uta/pvta,
+# `staging` -> uta-beta/pvta-beta. `main` is integration only and publishes nothing. The monthly cron and manual
+# runs use the workflow definition from the default branch but always check out pointer code.
+
 on:
   push:
     branches:
-      - main
-      - beta
+      - production
+      - staging
     paths:
       - 'src/**'
       - '.github/workflows/schedule_update.yml'
       - 'requirements.txt'
   schedule:
-    # 00:00 UTC on the 1st of every month (runs on default branch: main)
+    # 00:00 UTC on the 1st of every month (runs from the default branch, builds production code)
     - cron: "0 0 1 * *"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: 'production builds the production branch, beta the staging branch'
+        type: choice
+        options: [production, beta]
+        default: production
 
 permissions:
   contents: read
 
+env:
+  CHANNEL: ${{ inputs.channel || (github.ref == 'refs/heads/staging' && 'beta') || 'production' }}
+  SOURCE_REF: ${{ (inputs.channel || (github.ref == 'refs/heads/staging' && 'beta') || 'production') == 'beta' && 'staging' || 'production' }}
+
 concurrency:
-  group: schedule-update-${{ github.ref }}
+  group: schedule-update-${{ inputs.channel || (github.ref == 'refs/heads/staging' && 'beta') || 'production' }}
   cancel-in-progress: false
 
 jobs:
@@ -30,6 +44,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
 
       - name: Set up Python 3.11
@@ -104,7 +119,6 @@ jobs:
           retention-days: 1
 
   publish-schedules:
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/beta'
     needs: build-schedules
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -114,6 +128,7 @@ jobs:
       - name: Checkout validation code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ env.SOURCE_REF }}
           persist-credentials: false
 
       - name: Download schedule artifacts
@@ -130,21 +145,20 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          BRANCH: ${{ github.ref_name }}
         run: |
-          # Rolling release strategy: one release per agency per environment.
-          #   main  → tags: uta,      pvta
-          #   beta  → tags: uta-beta, pvta-beta
-          if [ "$BRANCH" == "main" ]; then
+          # Rolling release strategy: one release per agency per channel (tag names are a consumer contract).
+          #   production (production pointer) → tags: uta,      pvta
+          #   beta       (staging pointer)    → tags: uta-beta, pvta-beta
+          if [ "$CHANNEL" == "production" ]; then
             UTA_TAG="uta"
             PVTA_TAG="pvta"
             PRERELEASE=""
-          elif [ "$BRANCH" == "beta" ]; then
+          elif [ "$CHANNEL" == "beta" ]; then
             UTA_TAG="uta-beta"
             PVTA_TAG="pvta-beta"
             PRERELEASE="--prerelease"
           else
-            echo "Unsupported branch: $BRANCH" >&2
+            echo "Unsupported channel: $CHANNEL" >&2
             exit 1
           fi
 

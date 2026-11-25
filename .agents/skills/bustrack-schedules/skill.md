@@ -24,11 +24,11 @@ Android integration guide: [references/android-integration.md](references/androi
 All URLs are stable and permanent — the tag is clobbered on each update.
 
 ```
-Production (main branch):
+Production (`production` pointer branch):
   UTA  → https://github.com/gorkemg/bustrack-schedules/releases/download/uta/uta_schedules.json
   PVTA → https://github.com/gorkemg/bustrack-schedules/releases/download/pvta/pvta_schedules.json
 
-Beta (beta branch):
+Beta (`staging` pointer branch):
   UTA  → https://github.com/gorkemg/bustrack-schedules/releases/download/uta-beta/uta_schedules.json
   PVTA → https://github.com/gorkemg/bustrack-schedules/releases/download/pvta-beta/pvta_schedules.json
 ```
